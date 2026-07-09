@@ -1,0 +1,21 @@
+# Environment files
+.env
+.env.*
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+
+# Database files
+database/*.db
+database/*.sqlite3
+
+# Test / cache folders
+.pytest_cache/
+.mypy_cache/
