@@ -74,11 +74,12 @@ def process_symbol(client: BinanceClient, symbol: str) -> dict | None:
         return None
 
     db.save_market_snapshot(evaluation)
+    evaluation["alert_sent"] = False
     logger.debug("%s: market snapshot saved (score=%d)", symbol, evaluation["score"])
 
     if not evaluation.get("passes_hard_filters", False):
         reasons = evaluation.get("hard_filter_reasons", ["hard filters failed"])
-        logger.info(
+        logger.debug(
             "%s: alert skipped (%s)",
             symbol,
             "; ".join(reasons),
@@ -87,29 +88,45 @@ def process_symbol(client: BinanceClient, symbol: str) -> dict | None:
 
     if evaluation["score"] >= config.SCORE_THRESHOLD:
         if db.is_symbol_in_cooldown(symbol):
-            logger.info("%s: alert skipped (cooldown active, score=%d)", symbol, evaluation["score"])
+            logger.debug("%s: alert skipped (cooldown active, score=%d)", symbol, evaluation["score"])
         else:
             timestamp_utc = datetime.now(timezone.utc).isoformat()
             message = format_alert_message(evaluation, timestamp_utc)
             sent = send_telegram_alert(message)
+            evaluation["alert_sent"] = sent
             alert_id = db.save_alert(evaluation)
-            logger.info(
-                "%s: ALERT %s (score=%d, alert_id=%d) - database saved",
-                symbol, "sent" if sent else "send FAILED", evaluation["score"], alert_id,
-            )
+            if sent:
+                logger.info(
+                    "%s: ALERT sent (score=%d, alert_id=%d) - database saved",
+                    symbol, evaluation["score"], alert_id,
+                )
+            else:
+                logger.error(
+                    "%s: alert send FAILED (score=%d, alert_id=%d) - database saved",
+                    symbol, evaluation["score"], alert_id,
+                )
 
     return evaluation
 
 
 def run_single_scan(client: BinanceClient, symbols: list) -> None:
     """Evaluates every symbol once."""
-    alert_eligible_count = 0
+    counts = {
+        "ma": 0,
+        "volume": 0,
+        "oi": 0,
+        "funding": 0,
+        "threshold": 0,
+        "alerts_sent": 0,
+    }
+
+    logger.info("Scan started.")
 
     for i, symbol in enumerate(symbols, start=1):
         try:
             evaluation = process_symbol(client, symbol)
         except BinanceAPIError as exc:
-            logger.error("[%d/%d] %s: skipped due to data fetch error (%s)", i, len(symbols), symbol, exc)
+            logger.error("[%d/%d] %s: data fetch error (%s)", i, len(symbols), symbol, exc)
             time.sleep(config.SYMBOL_SCAN_DELAY_SECONDS)
             continue
         except Exception as exc:  # noqa: BLE001 - keep the scan loop alive
@@ -121,13 +138,24 @@ def run_single_scan(client: BinanceClient, symbols: list) -> None:
             logger.debug("[%d/%d] %s: not enough closed-candle data, skipped", i, len(symbols), symbol)
         else:
             logger.debug("[%d/%d] %s: score=%d", i, len(symbols), symbol, evaluation["score"])
+            counts["ma"] += int(evaluation.get("ma_filter_passed", False))
+            counts["volume"] += int(evaluation.get("volume_filter_passed", False))
+            counts["oi"] += int(evaluation.get("oi_filter_passed", False))
+            counts["funding"] += int(evaluation.get("funding_filter_passed", False))
             if evaluation["score"] >= config.SCORE_THRESHOLD:
-                alert_eligible_count += 1
+                counts["threshold"] += 1
+            counts["alerts_sent"] += int(evaluation.get("alert_sent", False))
 
         time.sleep(config.SYMBOL_SCAN_DELAY_SECONDS)
 
-    logger.info("Scan complete. %d/%d symbols met the score threshold this pass.",
-                alert_eligible_count, len(symbols))
+    logger.info("Total symbols scanned: %d", len(symbols))
+    logger.info("Passed MA filter: %d", counts["ma"])
+    logger.info("Passed volume filter: %d", counts["volume"])
+    logger.info("Passed OI filter: %d", counts["oi"])
+    logger.info("Passed funding filter: %d", counts["funding"])
+    logger.info("Reached score threshold: %d", counts["threshold"])
+    logger.info("Alerts sent: %d", counts["alerts_sent"])
+    logger.info("Scan complete.")
 
 
 def run_trend_health_monitor(client: BinanceClient) -> None:
@@ -216,8 +244,9 @@ def main() -> None:
     try:
         symbols = load_usdt_perpetual_symbols(client)
     except BinanceAPIError as exc:
-        logger.error("Failed to load symbols from Binance: %s", exc)
-        sys.exit(1)
+        logger.error("Failed to load symbols from Binance at startup: %s", exc)
+        logger.warning("Continuing with an empty symbol list; the bot will retry on the next scan loop.")
+        symbols = []
 
     if config.MAX_SYMBOLS > 0:
         symbols = symbols[: config.MAX_SYMBOLS]
@@ -231,8 +260,7 @@ def main() -> None:
 
     try:
         while True:
-            logger.info("=" * 60)
-            logger.info("Starting scan...")
+            logger.debug("=" * 60)
             run_single_scan(client, symbols)
 
             try:
@@ -247,24 +275,29 @@ def main() -> None:
             except Exception:
                 logger.exception("Error while running trend health monitor")
 
-            # If the configured scan interval equals the 30-minute default,
-            # synchronize scans to :00 and :30 UTC. Otherwise, honor the
-            # configured interval literally.
-            if config.SCAN_INTERVAL_SECONDS == 1800:
+            # Keep the primary 15-minute strategy near :05, :20, :35, and
+            # :50 UTC. These offsets allow the just-closed hourly candle a
+            # few minutes to settle while still refreshing intrahour OI and
+            # price. Other configured intervals are honored literally.
+            if config.SCAN_INTERVAL_SECONDS == 900:
                 now = datetime.now(timezone.utc)
-                if now.minute < 30:
-                    target = now.replace(minute=30, second=0, microsecond=0)
-                else:
-                    target = (now + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+                target = None
+                for minute in (5, 20, 35, 50):
+                    candidate = now.replace(minute=minute, second=0, microsecond=0)
+                    if candidate > now:
+                        target = candidate
+                        break
+                if target is None:
+                    target = (now + timedelta(hours=1)).replace(
+                        minute=5, second=0, microsecond=0
+                    )
                 sleep_secs = int((target - now).total_seconds())
                 if sleep_secs <= 0:
-                    sleep_secs = config.SCAN_INTERVAL_SECONDS
-                elif sleep_secs > config.SCAN_INTERVAL_SECONDS:
                     sleep_secs = config.SCAN_INTERVAL_SECONDS
             else:
                 sleep_secs = config.SCAN_INTERVAL_SECONDS
 
-            logger.info("Sleeping for %d seconds...", sleep_secs)
+            logger.debug("Sleeping for %d seconds...", sleep_secs)
             time.sleep(sleep_secs)
     except KeyboardInterrupt:
         logger.info("Stopped by user. Goodbye!")

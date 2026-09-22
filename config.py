@@ -12,12 +12,14 @@ simple module-level constants that the rest of the app imports.
 """
 
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 
 # Load variables from a local .env file into the process environment.
-# If .env does not exist, this silently does nothing (and os.getenv falls
-# back to the defaults below), so the bot still runs with sane defaults.
-load_dotenv()
+# Resolve the file relative to this module so the bot still picks up the
+# repository's .env even when it is started from another working directory.
+PROJECT_ROOT = Path(__file__).resolve().parent
+load_dotenv(PROJECT_ROOT / ".env")
 
 
 def _get_float(name: str, default: float) -> float:
@@ -42,7 +44,10 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
 # --- Binance USDT-M Futures (PUBLIC endpoints only, read-only) ------------
 # No private/trading endpoints are ever called by this bot. See data/binance_client.py.
-BINANCE_FAPI_BASE_URL = "https://fapi.binance.com"
+# Allow overrides from .env while keeping a safe default for offline use.
+BINANCE_FAPI_BASE_URL = os.getenv("BINANCE_FAPI_BASE_URL", "https://fapi.binance.com").strip()
+if not BINANCE_FAPI_BASE_URL:
+    BINANCE_FAPI_BASE_URL = "https://fapi.binance.com"
 QUOTE_ASSET = os.getenv("QUOTE_ASSET", "USDT")
 
 # --- Moving averages (configurable periods, NOT hardcoded) ----------------
@@ -59,7 +64,7 @@ TIMEFRAME = os.getenv("TIMEFRAME", "1h")
 
 # --- Scan / scoring settings ------------------------------------------------
 SCORE_THRESHOLD = _get_int("SCORE_THRESHOLD", 75)          # score needed to alert
-SCAN_INTERVAL_SECONDS = _get_int("SCAN_INTERVAL_SECONDS", 1800)
+SCAN_INTERVAL_SECONDS = _get_int("SCAN_INTERVAL_SECONDS", 900)
 MAX_SYMBOLS = _get_int("MAX_SYMBOLS", 0)                    # 0 = scan all symbols
 
 # Number of candles to request per symbol. Needs to comfortably cover

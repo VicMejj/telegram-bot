@@ -90,7 +90,9 @@ class BinanceClient:
     def get_open_interest_history(self, symbol: str, period: str, limit: int = 2) -> list:
         """Returns historical OI samples for a symbol at the requested period."""
         params = {"symbol": symbol, "period": period, "limit": limit}
-        return self._get("/fapi/v1/openInterestHist", params=params)
+        # Unlike most USDT-M endpoints, Binance exposes historical market
+        # statistics under /futures/data rather than /fapi/v1.
+        return self._get("/futures/data/openInterestHist", params=params)
 
     def get_premium_index(self, symbol: str) -> dict:
         """

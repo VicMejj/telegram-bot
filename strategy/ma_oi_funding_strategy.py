@@ -56,6 +56,39 @@ def evaluate_symbol(client: BinanceClient, symbol: str) -> dict | None:
     history_rows = db.get_recent_alert_history_rows()
     filter_passed, filter_reasons = passes_hard_filters(indicators, funding_rate, oi_info)
 
+    # Preserve each stage's result for aggregate scan reporting. This does
+    # not change the hard-filter or scoring decisions below.
+    ma_filter_passed = (
+        indicators.get("current_price") is not None
+        and indicators.get("ma7") is not None
+        and indicators.get("ma25") is not None
+        and indicators.get("ma99") is not None
+        and indicators["current_price"] > indicators["ma7"]
+        and indicators["ma7"] > indicators["ma25"]
+        and indicators["ma25"] > indicators["ma99"]
+    )
+    volume_filter_passed = (
+        indicators.get("volume_ratio") is not None
+        and indicators["volume_ratio"] >= config.VOLUME_RATIO_MIN
+    )
+    oi_15m = oi_info.get("oi_15m_change_pct")
+    oi_30m = oi_info.get("oi_30m_change_pct")
+    oi_1h = oi_info.get("oi_1h_change_pct")
+    oi_filter_passed = (
+        oi_15m is not None
+        and oi_30m is not None
+        and oi_1h is not None
+        and oi_15m >= config.OI_15M_MIN_INCREASE_PCT
+        and oi_30m >= config.OI_30M_MIN_INCREASE_PCT
+        and oi_1h >= config.OI_1H_MIN_INCREASE_PCT
+        and oi_30m > oi_15m
+        and oi_1h > oi_30m
+    )
+    funding_filter_passed = (
+        funding_rate is not None
+        and funding_rate <= config.FUNDING_HEALTHY_THRESHOLD
+    )
+
     if not filter_passed:
         scoring = {
             "final_score": 0,
@@ -95,6 +128,10 @@ def evaluate_symbol(client: BinanceClient, symbol: str) -> dict | None:
         "oi_30m_change_pct": oi_info.get("oi_30m_change_pct"),
         "oi_1h_change_pct": oi_info.get("oi_1h_change_pct"),
         "passes_hard_filters": filter_passed,
+        "ma_filter_passed": ma_filter_passed,
+        "volume_filter_passed": volume_filter_passed,
+        "oi_filter_passed": oi_filter_passed,
+        "funding_filter_passed": funding_filter_passed,
         "hard_filter_reasons": filter_reasons,
         "score": scoring["final_score"],
         "score_breakdown": scoring["score_breakdown"],

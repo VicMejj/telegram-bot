@@ -10,14 +10,19 @@ value (not a delta), so the bot keeps its own history in SQLite to derive
 
 import logging
 
-from data.binance_client import BinanceClient
+from data.binance_client import BinanceAPIError, BinanceClient
 from database import db
 
 logger = logging.getLogger(__name__)
 
 
 def _get_history_change_pct(client: BinanceClient, symbol: str, period: str) -> tuple[float | None, bool]:
-    raw_history = client.get_open_interest_history(symbol=symbol, period=period, limit=2)
+    try:
+        raw_history = client.get_open_interest_history(symbol=symbol, period=period, limit=2)
+    except BinanceAPIError:
+        logger.debug("%s: OI history unavailable for period=%s", symbol, period)
+        return None, False
+
     if not raw_history or len(raw_history) < 2:
         return None, False
 
